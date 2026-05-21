@@ -95,6 +95,7 @@ library OracleLibrary {
     /// @return The tick that the pool was in at the start of the current block
     function getBlockStartingTickAndLiquidity(address pool) internal view returns (int24, uint128) {
         (, int24 tick, uint16 observationIndex, uint16 observationCardinality, , , ) = IUniswapV3Pool(pool).slot0();
+        uint128 liquidity = IUniswapV3Pool(pool).liquidity();
 
         // 2 observations are needed to reliably calculate the block starting tick
         require(observationCardinality > 1, 'NEO');
@@ -102,6 +103,10 @@ library OracleLibrary {
         // If the latest observation occurred in the past, then no tick-changing trades have happened in this block
         // therefore the tick in `slot0` is the same as at the beginning of the current block.
         // We don't need to check if this observation is initialized - it is guaranteed to be.
+        (uint32 observationTimestamp, int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128, ) =
+            IUniswapV3Pool(pool).observations(observationIndex);
+        if (observationTimestamp != uint32(block.timestamp)) {
+            return (tick, liquidity);
         (
             uint32 observationTimestamp,
             int56 tickCumulative,
@@ -123,6 +128,11 @@ library OracleLibrary {
         require(prevInitialized, 'ONI');
 
         uint32 delta = observationTimestamp - prevObservationTimestamp;
+        tick = int24((tickCumulative - prevTickCumulative) / delta);
+        liquidity = uint128(
+            (uint160(delta) << 128) / (secondsPerLiquidityCumulativeX128 - prevSecondsPerLiquidityCumulativeX128)
+        );
+        return (tick, liquidity);
         tick = int24((tickCumulative - int56(uint56(prevTickCumulative))) / int56(uint56(delta)));
         uint128 liquidity = uint128(
             (uint192(delta) * type(uint160).max) /
