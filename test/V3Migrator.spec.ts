@@ -1,5 +1,5 @@
 import { Fixture } from 'ethereum-waffle'
-import { constants, Contract } from 'ethers'
+import { constants, Contract, Wallet } from 'ethers'
 import { ethers, waffle } from 'hardhat'
 import {
   IUniswapV2Pair,
@@ -21,8 +21,7 @@ import { sortedTokens } from './shared/tokenSort'
 import { getMaxTick, getMinTick } from './shared/ticks'
 
 describe('V3Migrator', () => {
-  const wallets = waffle.provider.getWallets()
-  const wallet = wallets[0]
+  let wallet: Wallet
 
   const migratorFixture: Fixture<{
     factoryV2: Contract
@@ -42,11 +41,9 @@ describe('V3Migrator', () => {
     await weth9.approve(nft.address, constants.MaxUint256)
 
     // deploy the migrator
-    const migrator = (await (await ethers.getContractFactory('V3Migrator')).deploy(
-      factory.address,
-      weth9.address,
-      nft.address
-    )) as V3Migrator
+    const migrator = (await (
+      await ethers.getContractFactory('V3Migrator')
+    ).deploy(factory.address, weth9.address, nft.address)) as V3Migrator
 
     return {
       factoryV2,
@@ -68,12 +65,32 @@ describe('V3Migrator', () => {
 
   let loadFixture: ReturnType<typeof waffle.createFixtureLoader>
 
+  const expectedLiquidity = 10000 - 1000
+
   before('create fixture loader', async () => {
+    const wallets = await (ethers as any).getSigners()
+    wallet = wallets[0]
+
     loadFixture = waffle.createFixtureLoader(wallets)
   })
 
   beforeEach('load fixture', async () => {
     ;({ factoryV2, factoryV3, token, weth9, nft, migrator } = await loadFixture(migratorFixture))
+  })
+
+  beforeEach('add V2 liquidity', async () => {
+    await factoryV2.createPair(token.address, weth9.address)
+
+    const pairAddress = await factoryV2.getPair(token.address, weth9.address)
+
+    pair = new ethers.Contract(pairAddress, PAIR_V2_ABI, wallet) as IUniswapV2Pair
+
+    await token.transfer(pair.address, 10000)
+    await weth9.transfer(pair.address, 10000)
+
+    await pair.mint(wallet.address)
+
+    expect(await pair.balanceOf(wallet.address)).to.be.eq(expectedLiquidity)
   })
 
   afterEach('ensure allowances are cleared', async () => {
@@ -97,26 +114,8 @@ describe('V3Migrator', () => {
 
   describe('#migrate', () => {
     let tokenLower: boolean
-
-    const expectedLiquidity = 10000 - 1000
-
     beforeEach(() => {
       tokenLower = token.address.toLowerCase() < weth9.address.toLowerCase()
-    })
-
-    beforeEach('add V2 liquidity', async () => {
-      await factoryV2.createPair(token.address, weth9.address)
-
-      const pairAddress = await factoryV2.getPair(token.address, weth9.address)
-
-      pair = new ethers.Contract(pairAddress, PAIR_V2_ABI, wallet) as IUniswapV2Pair
-
-      await token.transfer(pair.address, 10000)
-      await weth9.transfer(pair.address, 10000)
-
-      await pair.mint(wallet.address)
-
-      expect(await pair.balanceOf(wallet.address)).to.be.eq(expectedLiquidity)
     })
 
     it('fails if v3 pool is not initialized', async () => {

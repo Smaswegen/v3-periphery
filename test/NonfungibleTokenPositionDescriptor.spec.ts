@@ -1,4 +1,4 @@
-import { constants } from 'ethers'
+import { constants, Wallet } from 'ethers'
 import { waffle, ethers } from 'hardhat'
 import { expect } from './shared/expect'
 import { Fixture } from 'ethereum-waffle'
@@ -17,7 +17,7 @@ const TBTC = '0x8dAEBADE922dF735c38C80C7eBD708Af50815fAa'
 const WBTC = '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599'
 
 describe('NonfungibleTokenPositionDescriptor', () => {
-  const [...wallets] = waffle.provider.getWallets()
+  let wallets: Wallet[]
 
   const nftPositionDescriptorCompleteFixture: Fixture<{
     nftPositionDescriptor: NonfungibleTokenPositionDescriptor
@@ -26,11 +26,11 @@ describe('NonfungibleTokenPositionDescriptor', () => {
   }> = async (wallets, provider) => {
     const { factory, nft, router, nftDescriptor } = await completeFixture(wallets, provider)
     const tokenFactory = await ethers.getContractFactory('TestERC20')
-    const tokens = (await Promise.all([
-      tokenFactory.deploy(constants.MaxUint256.div(2)), // do not use maxu25e6 to avoid overflowing
-      tokenFactory.deploy(constants.MaxUint256.div(2)),
-      tokenFactory.deploy(constants.MaxUint256.div(2)),
-    ])) as [TestERC20, TestERC20, TestERC20]
+    const tokens: [TestERC20, TestERC20, TestERC20] = [
+      (await tokenFactory.deploy(constants.MaxUint256.div(2))) as TestERC20, // do not use maxu256 to avoid overflowing
+      (await tokenFactory.deploy(constants.MaxUint256.div(2))) as TestERC20,
+      (await tokenFactory.deploy(constants.MaxUint256.div(2))) as TestERC20,
+    ]
     tokens.sort((a, b) => (a.address.toLowerCase() < b.address.toLowerCase() ? -1 : 1))
 
     return {
@@ -48,6 +48,8 @@ describe('NonfungibleTokenPositionDescriptor', () => {
   let loadFixture: ReturnType<typeof waffle.createFixtureLoader>
 
   before('create fixture loader', async () => {
+    wallets = await (ethers as any).getSigners()
+
     loadFixture = waffle.createFixtureLoader(wallets)
   })
 
@@ -167,6 +169,49 @@ describe('NonfungibleTokenPositionDescriptor', () => {
       const metadata = extractJSONFromURI(await nft.tokenURI(1))
       expect(metadata.name).to.match(/TEST\/TEST/)
       expect(metadata.description).to.match(/TEST-TEST/)
+    })
+
+    it('can render a different label for native currencies', async () => {
+      const [token0, token1] = sortedTokens(weth9, tokens[1])
+      await nft.createAndInitializePoolIfNecessary(
+        token0.address,
+        token1.address,
+        FeeAmount.MEDIUM,
+        encodePriceSqrt(1, 1)
+      )
+      await weth9.approve(nft.address, 100)
+      await tokens[1].approve(nft.address, 100)
+      await nft.mint({
+        token0: token0.address,
+        token1: token1.address,
+        fee: FeeAmount.MEDIUM,
+        tickLower: getMinTick(TICK_SPACINGS[FeeAmount.MEDIUM]),
+        tickUpper: getMaxTick(TICK_SPACINGS[FeeAmount.MEDIUM]),
+        recipient: wallets[0].address,
+        amount0Desired: 100,
+        amount1Desired: 100,
+        amount0Min: 0,
+        amount1Min: 0,
+        deadline: 1,
+      })
+
+      const nftDescriptorLibraryFactory = await ethers.getContractFactory('NFTDescriptor')
+      const nftDescriptorLibrary = await nftDescriptorLibraryFactory.deploy()
+      const positionDescriptorFactory = await ethers.getContractFactory('NonfungibleTokenPositionDescriptor', {
+        libraries: {
+          NFTDescriptor: nftDescriptorLibrary.address,
+        },
+      })
+      const nftDescriptor = (await positionDescriptorFactory.deploy(
+        weth9.address,
+        // 'FUNNYMONEY' as a bytes32 string
+        '0x46554e4e594d4f4e455900000000000000000000000000000000000000000000'
+      )) as NonfungibleTokenPositionDescriptor
+
+      const metadata = extractJSONFromURI(await nftDescriptor.tokenURI(nft.address, 1))
+      expect(metadata.name).to.match(/(\sFUNNYMONEY\/TEST|TEST\/FUNNYMONEY)/)
+      expect(metadata.description).to.match(/(TEST-FUNNYMONEY|\sFUNNYMONEY-TEST)/)
+      expect(metadata.description).to.match(/(\nFUNNYMONEY\sAddress)/)
     })
   })
 })

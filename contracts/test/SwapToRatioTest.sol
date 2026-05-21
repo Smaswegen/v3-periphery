@@ -54,6 +54,29 @@ contract SwapToRatioTest {
     }
 
     function tickToSqrtRatioX96(int24 tick) external pure returns (uint160) {
+    function swapToNextInitializedTickGas(
+        SwapToRatio.PoolParams memory poolParams,
+        SwapToRatio.PositionParams memory positionParams,
+        uint160 sqrtRatioX96Target,
+        bool zeroForOne
+    ) external view returns (uint256) {
+        uint256 gasBefore = gasleft();
+        SwapToRatio.swapToNextInitializedTick(poolParams, positionParams, sqrtRatioX96Target, zeroForOne);
+        return gasBefore - gasleft();
+    }
+
+    function getPostSwapPriceGas(IUniswapV3Pool pool, SwapToRatio.PositionParams memory positionParams)
+        external
+        view
+        returns (uint256)
+    {
+        uint256 gasBefore = gasleft();
+        SwapToRatio.getPostSwapPrice(pool, positionParams);
+        return gasBefore - gasleft();
+    }
+
+    // extra helper functions for tests
+    function getSqrtRatioAtTick(int24 tick) external pure returns (uint160) {
         return TickMath.getSqrtRatioAtTick(tick);
     }
 
@@ -63,6 +86,7 @@ contract SwapToRatioTest {
         uint128 liquidity,
         bool roundUp
     ) external pure returns (uint256 amount1) {
+    ) external pure returns (uint256) {
         return SqrtPriceMath.getAmount0Delta(sqrtRatioAX96, sqrtRatioBX96, liquidity, roundUp);
     }
 
@@ -72,6 +96,7 @@ contract SwapToRatioTest {
         uint128 liquidity,
         bool roundUp
     ) external pure returns (uint256 amount1) {
+    ) external pure returns (uint256) {
         return SqrtPriceMath.getAmount1Delta(sqrtRatioAX96, sqrtRatioBX96, liquidity, roundUp);
     }
 }
