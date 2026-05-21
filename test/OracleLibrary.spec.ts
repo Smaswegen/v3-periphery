@@ -54,6 +54,11 @@ describe('OracleLibrary', () => {
 
     it('correct output when tick is 0', async () => {
       const period = 3
+      const tickCumulatives = [BigNumber.from(12), BigNumber.from(12)]
+      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
+      const oracleTick = await oracle.consult(mockObservable.address, period)
+
+      expect(oracleTick).to.equal(BN0)
       const secondsPerLiqCumulatives: [BigNumberish, BigNumberish] = [10, 20]
       const mockObservable = await observableWith({
         period,

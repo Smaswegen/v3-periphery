@@ -3,6 +3,8 @@ pragma solidity =0.8.15;
 
 import '@uniswap/v3-core/contracts/libraries/Oracle.sol';
 
+import '@uniswap/v3-core/contracts/libraries/Oracle.sol';
+
 contract MockObservations {
     Oracle.Observation[4] internal oracleObservations;
 
