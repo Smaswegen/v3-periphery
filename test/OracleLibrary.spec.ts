@@ -1,6 +1,6 @@
 import { expect } from 'chai'
 import { ethers, waffle } from 'hardhat'
-import { BigNumber, constants, ContractFactory, Contract } from 'ethers'
+import { BigNumber, BigNumberish, constants, ContractFactory, Contract } from 'ethers'
 import { OracleTest, TestERC20 } from '../typechain'
 import { expandTo18Decimals } from './shared/expandTo18Decimals'
 import snapshotGasCost from './shared/snapshotGasCost'
@@ -14,8 +14,9 @@ describe('OracleLibrary', () => {
 
   const oracleTestFixture = async () => {
     const tokenFactory = await ethers.getContractFactory('TestERC20')
-    const tokens: [TestERC20, TestERC20] = [
+    const tokens: [TestERC20, TestERC20, TestERC20] = [
       (await tokenFactory.deploy(constants.MaxUint256.div(2))) as TestERC20, // do not use maxu256 to avoid overflowing
+      (await tokenFactory.deploy(constants.MaxUint256.div(2))) as TestERC20,
       (await tokenFactory.deploy(constants.MaxUint256.div(2))) as TestERC20,
     ]
 
@@ -58,70 +59,76 @@ describe('OracleLibrary', () => {
       const oracleTick = await oracle.consult(mockObservable.address, period)
 
       expect(oracleTick).to.equal(BN0)
-    })
+      const secondsPerLiqCumulatives: [BigNumberish, BigNumberish] = [10, 20]
+      const mockObservable = await observableWith({
+        period,
+        tickCumulatives: [12, 12],
+        secondsPerLiqCumulatives,
+      })
+      const { arithmeticMeanTick, harmonicMeanLiquidity } = await oracle.consult(mockObservable.address, period)
 
-    it('correct output for positive tick', async () => {
-      const period = 3
-      const tickCumulatives = [BigNumber.from(7), BigNumber.from(12)]
-      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
-      const oracleTick = await oracle.consult(mockObservable.address, period)
-
-      // Always round to negative infinity
-      // In this case, we don't have do anything
-      expect(oracleTick).to.equal(BigNumber.from(1))
-    })
-
-    it('correct output for negative tick', async () => {
-      const period = 3
-      const tickCumulatives = [BigNumber.from(-7), BigNumber.from(-12)]
-      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
-      const oracleTick = await oracle.consult(mockObservable.address, period)
-
-      // Always round to negative infinity
-      // In this case, we need to subtract one because integer division rounds to 0
-      expect(oracleTick).to.equal(BigNumber.from(-2))
+      expect(arithmeticMeanTick).to.equal(0)
+      expect(harmonicMeanLiquidity).to.equal(calculateHarmonicAvgLiq(period, secondsPerLiqCumulatives))
     })
 
     it('correct rounding for .5 negative tick', async () => {
       const period = 4
-      const tickCumulatives = [BigNumber.from(-10), BigNumber.from(-12)]
-      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
-      const oracleTick = await oracle.consult(mockObservable.address, period)
+
+      const secondsPerLiqCumulatives: [BigNumberish, BigNumberish] = [10, 15]
+      const mockObservable = await observableWith({
+        period,
+        tickCumulatives: [-10, -12],
+        secondsPerLiqCumulatives,
+      })
+
+      const { arithmeticMeanTick, harmonicMeanLiquidity } = await oracle.consult(mockObservable.address, period)
 
       // Always round to negative infinity
       // In this case, we need to subtract one because integer division rounds to 0
-      expect(oracleTick).to.equal(BigNumber.from(-1))
+      expect(arithmeticMeanTick).to.equal(-1)
+      expect(harmonicMeanLiquidity).to.equal(calculateHarmonicAvgLiq(period, secondsPerLiqCumulatives))
     })
 
-    it('correct output for tick cumulatives across overflow boundaries', async () => {
-      const period = 4
-      const tickCumulatives = [BigNumber.from(-100), BigNumber.from('36028797018963967')]
-      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
-      const oracleTick = await oracle.consult(mockObservable.address, period)
+    it('correct output for liquidity overflow', async () => {
+      const period = 1
 
-      // Always round to negative infinity
-      // In this case, we don't have do anything
-      expect(oracleTick).to.equal(BigNumber.from(24))
+      const secondsPerLiqCumulatives: [BigNumberish, BigNumberish] = [10, 11]
+      const mockObservable = await observableWith({
+        period,
+        tickCumulatives: [12, 12],
+        secondsPerLiqCumulatives,
+      })
+
+      const { arithmeticMeanTick, harmonicMeanLiquidity } = await oracle.consult(mockObservable.address, period)
+
+      expect(arithmeticMeanTick).to.equal(0)
+      // Make sure liquidity doesn't overflow uint128
+      expect(harmonicMeanLiquidity).to.equal(BigNumber.from(2).pow(128).sub(1))
     })
 
-    it('correct output for tick cumulatives across underflow boundaries', async () => {
-      const period = 4
-      const tickCumulatives = [BigNumber.from(100), BigNumber.from('-36028797018963967')]
-      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
-      const oracleTick = await oracle.consult(mockObservable.address, period)
+    function calculateHarmonicAvgLiq(period: number, secondsPerLiqCumulatives: [BigNumberish, BigNumberish]) {
+      const [secondsPerLiq0, secondsPerLiq1] = secondsPerLiqCumulatives.map(BigNumber.from)
+      const delta = secondsPerLiq1.sub(secondsPerLiq0)
 
-      // Always round to negative infinity
-      // In this case, we need to subtract one because integer division rounds to 0
-      expect(oracleTick).to.equal(BigNumber.from(-25))
-    })
+      const maxUint160 = BigNumber.from(2).pow(160).sub(1)
+      return maxUint160.mul(period).div(delta.shl(32))
+    }
 
-    it('gas test', async () => {
-      const period = 3
-      const tickCumulatives = [BigNumber.from(7), BigNumber.from(12)]
-      const mockObservable = await mockObservableFactory.deploy([period, 0], tickCumulatives, [0, 0])
-
-      await snapshotGasCost(oracle.getGasCostOfConsult(mockObservable.address, period))
-    })
+    function observableWith({
+      period,
+      tickCumulatives,
+      secondsPerLiqCumulatives,
+    }: {
+      period: number
+      tickCumulatives: [BigNumberish, BigNumberish]
+      secondsPerLiqCumulatives: [BigNumberish, BigNumberish]
+    }) {
+      return mockObservableFactory.deploy(
+        [period, 0],
+        tickCumulatives.map(BigNumber.from),
+        secondsPerLiqCumulatives.map(BigNumber.from)
+      )
+    }
   })
 
   describe('#getQuoteAtTick', () => {
@@ -448,6 +455,226 @@ describe('OracleLibrary', () => {
 
       var actualStartingLiquidity = 13212 // see comments above
       expect(result[1]).to.equal(actualStartingLiquidity)
+    })
+  })
+
+  describe('#getWeightedArithmeticMeanTick', () => {
+    it('single observation returns average tick', async () => {
+      const observation = { tick: 10, weight: 10 }
+
+      const oracleTick = await oracle.getWeightedArithmeticMeanTick([observation])
+
+      expect(oracleTick).to.equal(10)
+    })
+
+    it('multiple observations with same weight result in average across tiers', async () => {
+      const observation1 = { tick: 10, weight: 10 }
+      const observation2 = { tick: 20, weight: 10 }
+
+      const oracleTick = await oracle.getWeightedArithmeticMeanTick([observation1, observation2])
+
+      expect(oracleTick).to.equal(15)
+    })
+
+    it('multiple observations with different weights are weighted correctly', async () => {
+      const observation2 = { tick: 20, weight: 15 }
+      const observation1 = { tick: 10, weight: 10 }
+
+      const oracleTick = await oracle.getWeightedArithmeticMeanTick([observation1, observation2])
+
+      expect(oracleTick).to.equal(16)
+    })
+
+    it('correct rounding for .5 negative tick', async () => {
+      const observation1 = { tick: -10, weight: 10 }
+      const observation2 = { tick: -11, weight: 10 }
+
+      const oracleTick = await oracle.getWeightedArithmeticMeanTick([observation1, observation2])
+
+      expect(oracleTick).to.equal(-11)
+    })
+  })
+  describe('#getChainedPrice', () => {
+    let ticks: number[]
+
+    it('fails with discrepant length', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[2].address]
+      ticks = [5, 5]
+
+      expect(oracle.getChainedPrice(tokenAddresses, ticks)).to.be.revertedWith('DL')
+    })
+    it('add two positive ticks, sorted order', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[1].address, tokens[2].address]
+      ticks = [5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(10)
+    })
+    it('add one positive and one negative tick, sorted order', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[1].address, tokens[2].address]
+      ticks = [5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add one negative and one positive tick, sorted order', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[1].address, tokens[2].address]
+      ticks = [-5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add two negative ticks, sorted order', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[1].address, tokens[2].address]
+      ticks = [-5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(-10)
+    })
+
+    it('add two positive ticks, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[2].address, tokens[1].address]
+      ticks = [5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add one positive tick and one negative tick, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[2].address, tokens[1].address]
+      ticks = [5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(10)
+    })
+    it('add one negative tick and one positive tick, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[2].address, tokens[1].address]
+      ticks = [-5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(-10)
+    })
+    it('add two negative ticks, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[0].address, tokens[2].address, tokens[1].address]
+      ticks = [-5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+
+    it('add two positive ticks, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[0].address, tokens[2].address]
+      ticks = [5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add one positive tick and one negative tick, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[0].address, tokens[2].address]
+      ticks = [5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(-10)
+    })
+    it('add one negative tick and one positive tick, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[0].address, tokens[2].address]
+      ticks = [-5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(10)
+    })
+    it('add two negative ticks, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[0].address, tokens[2].address]
+      ticks = [-5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+
+    it('add two positive ticks, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[2].address, tokens[0].address]
+      ticks = [5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add one positive tick and one negative tick, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[2].address, tokens[0].address]
+      ticks = [5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(10)
+    })
+    it('add one negative tick and one positive tick, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[2].address, tokens[0].address]
+      ticks = [-5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(-10)
+    })
+    it('add two negative ticks, token0/token1 + token1/token0', async () => {
+      const tokenAddresses = [tokens[1].address, tokens[2].address, tokens[0].address]
+      ticks = [-5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+
+    it('add two positive ticks, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[0].address, tokens[1].address]
+      ticks = [5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add one positive tick and one negative tick, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[0].address, tokens[1].address]
+      ticks = [5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(-10)
+    })
+    it('add one negative tick and one positive tick, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[0].address, tokens[1].address]
+      ticks = [-5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(10)
+    })
+    it('add two negative ticks, token1/token0 + token0/token1', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[0].address, tokens[1].address]
+      ticks = [-5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+
+    it('add two positive ticks, token1/token0 + token1/token0', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[1].address, tokens[0].address]
+      ticks = [5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(-10)
+    })
+    it('add one positive tick and one negative tick, token1/token0 + token1/token0', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[1].address, tokens[0].address]
+      ticks = [5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add one negative tick and one positive tick, token1/token0 + token1/token0', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[1].address, tokens[0].address]
+      ticks = [-5, 5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(0)
+    })
+    it('add two negative ticks, token1/token0 + token1/token0', async () => {
+      const tokenAddresses = [tokens[2].address, tokens[1].address, tokens[0].address]
+      ticks = [-5, -5]
+      const oracleTick = await oracle.getChainedPrice(tokenAddresses, ticks)
+
+      expect(oracleTick).to.equal(10)
     })
   })
 })

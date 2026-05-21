@@ -1,33 +1,43 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity >=0.5.0 <0.8.0;
+pragma solidity >=0.5.0 <0.9.0;
 
 import '@uniswap/v3-core/contracts/libraries/FullMath.sol';
 import '@uniswap/v3-core/contracts/libraries/TickMath.sol';
 import '@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol';
-import '@uniswap/v3-core/contracts/libraries/LowGasSafeMath.sol';
-import '../libraries/PoolAddress.sol';
 
 /// @title Oracle library
 /// @notice Provides functions to integrate with V3 pool oracle
 library OracleLibrary {
-    /// @notice Fetches time-weighted average tick using Uniswap V3 oracle
-    /// @param pool Address of Uniswap V3 pool that we want to observe
-    /// @param period Number of seconds in the past to start calculating time-weighted average
-    /// @return timeWeightedAverageTick The time-weighted average tick from (block.timestamp - period) to block.timestamp
-    function consult(address pool, uint32 period) internal view returns (int24 timeWeightedAverageTick) {
-        require(period != 0, 'BP');
+    /// @notice Calculates time-weighted means of tick and liquidity for a given Uniswap V3 pool
+    /// @param pool Address of the pool that we want to observe
+    /// @param secondsAgo Number of seconds in the past from which to calculate the time-weighted means
+    /// @return arithmeticMeanTick The arithmetic mean tick from (block.timestamp - secondsAgo) to block.timestamp
+    /// @return harmonicMeanLiquidity The harmonic mean liquidity from (block.timestamp - secondsAgo) to block.timestamp
+    function consult(address pool, uint32 secondsAgo)
+        internal
+        view
+        returns (int24 arithmeticMeanTick, uint128 harmonicMeanLiquidity)
+    {
+        require(secondsAgo != 0, 'BP');
 
-        uint32[] memory secondAgos = new uint32[](2);
-        secondAgos[0] = period;
-        secondAgos[1] = 0;
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = secondsAgo;
+        secondsAgos[1] = 0;
 
-        (int56[] memory tickCumulatives, ) = IUniswapV3Pool(pool).observe(secondAgos);
+        (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s) = IUniswapV3Pool(pool)
+            .observe(secondsAgos);
+
         int56 tickCumulativesDelta = tickCumulatives[1] - tickCumulatives[0];
+        uint160 secondsPerLiquidityCumulativesDelta = secondsPerLiquidityCumulativeX128s[1] -
+            secondsPerLiquidityCumulativeX128s[0];
 
-        timeWeightedAverageTick = int24(tickCumulativesDelta / period);
-
+        arithmeticMeanTick = int24(tickCumulativesDelta / int56(uint56(secondsAgo)));
         // Always round to negative infinity
-        if (tickCumulativesDelta < 0 && (tickCumulativesDelta % period != 0)) timeWeightedAverageTick--;
+        if (tickCumulativesDelta < 0 && (tickCumulativesDelta % int56(uint56(secondsAgo)) != 0)) arithmeticMeanTick--;
+
+        // We are multiplying here instead of shifting to ensure that harmonicMeanLiquidity doesn't overflow uint128
+        uint192 secondsAgoX160 = uint192(secondsAgo) * type(uint160).max;
+        harmonicMeanLiquidity = uint128(secondsAgoX160 / (uint192(secondsPerLiquidityCumulativesDelta) << 32));
     }
 
     /// @notice Given a tick and a token amount, calculates the amount of token received in exchange
@@ -60,13 +70,14 @@ library OracleLibrary {
 
     /// @notice Given a pool, it returns the number of seconds ago of the oldest stored observation
     /// @param pool Address of Uniswap V3 pool that we want to observe
-    /// @return The number of seconds ago of the oldest observation stored for the pool
-    function getOldestObservationSecondsAgo(address pool) internal view returns (uint32) {
+    /// @return secondsAgo The number of seconds ago of the oldest observation stored for the pool
+    function getOldestObservationSecondsAgo(address pool) internal view returns (uint32 secondsAgo) {
         (, , uint16 observationIndex, uint16 observationCardinality, , , ) = IUniswapV3Pool(pool).slot0();
         require(observationCardinality > 0, 'NI');
 
-        (uint32 observationTimestamp, , , bool initialized) =
-            IUniswapV3Pool(pool).observations((observationIndex + 1) % observationCardinality);
+        (uint32 observationTimestamp, , , bool initialized) = IUniswapV3Pool(pool).observations(
+            (observationIndex + 1) % observationCardinality
+        );
 
         // The next index might not be initialized if the cardinality is in the process of increasing
         // In this case the oldest observation is always in index 0
@@ -74,7 +85,9 @@ library OracleLibrary {
             (observationTimestamp, , , ) = IUniswapV3Pool(pool).observations(0);
         }
 
-        return uint32(block.timestamp) - observationTimestamp;
+        unchecked {
+            secondsAgo = uint32(block.timestamp) - observationTimestamp;
+        }
     }
 
     /// @notice Given a pool, it returns the tick value as of the start of the current block
@@ -94,6 +107,14 @@ library OracleLibrary {
             IUniswapV3Pool(pool).observations(observationIndex);
         if (observationTimestamp != uint32(block.timestamp)) {
             return (tick, liquidity);
+        (
+            uint32 observationTimestamp,
+            int56 tickCumulative,
+            uint160 secondsPerLiquidityCumulativeX128,
+
+        ) = IUniswapV3Pool(pool).observations(observationIndex);
+        if (observationTimestamp != uint32(block.timestamp)) {
+            return (tick, IUniswapV3Pool(pool).liquidity());
         }
 
         uint256 prevIndex = (uint256(observationIndex) + observationCardinality - 1) % observationCardinality;
@@ -112,5 +133,64 @@ library OracleLibrary {
             (uint160(delta) << 128) / (secondsPerLiquidityCumulativeX128 - prevSecondsPerLiquidityCumulativeX128)
         );
         return (tick, liquidity);
+        tick = int24((tickCumulative - int56(uint56(prevTickCumulative))) / int56(uint56(delta)));
+        uint128 liquidity = uint128(
+            (uint192(delta) * type(uint160).max) /
+                (uint192(secondsPerLiquidityCumulativeX128 - prevSecondsPerLiquidityCumulativeX128) << 32)
+        );
+        return (tick, liquidity);
+    }
+
+    /// @notice Information for calculating a weighted arithmetic mean tick
+    struct WeightedTickData {
+        int24 tick;
+        uint128 weight;
+    }
+
+    /// @notice Given an array of ticks and weights, calculates the weighted arithmetic mean tick
+    /// @param weightedTickData An array of ticks and weights
+    /// @return weightedArithmeticMeanTick The weighted arithmetic mean tick
+    /// @dev Each entry of `weightedTickData` should represents ticks from pools with the same underlying pool tokens. If they do not,
+    /// extreme care must be taken to ensure that ticks are comparable (including decimal differences).
+    /// @dev Note that the weighted arithmetic mean tick corresponds to the weighted geometric mean price.
+    function getWeightedArithmeticMeanTick(WeightedTickData[] memory weightedTickData)
+        internal
+        pure
+        returns (int24 weightedArithmeticMeanTick)
+    {
+        // Accumulates the sum of products between each tick and its weight
+        int256 numerator;
+
+        // Accumulates the sum of the weights
+        uint256 denominator;
+
+        // Products fit in 152 bits, so it would take an array of length ~2**104 to overflow this logic
+        for (uint256 i; i < weightedTickData.length; i++) {
+            numerator += weightedTickData[i].tick * int256(uint256(weightedTickData[i].weight));
+            denominator += weightedTickData[i].weight;
+        }
+
+        weightedArithmeticMeanTick = int24(numerator / int256(denominator));
+        // Always round to negative infinity
+        if (numerator < 0 && (numerator % int256(denominator) != 0)) weightedArithmeticMeanTick--;
+    }
+
+    /// @notice Returns the "synthetic" tick which represents the price of the first entry in `tokens` in terms of the last
+    /// @dev Useful for calculating relative prices along routes.
+    /// @dev There must be one tick for each pairwise set of tokens.
+    /// @param tokens The token contract addresses
+    /// @param ticks The ticks, representing the price of each token pair in `tokens`
+    /// @return syntheticTick The synthetic tick, representing the relative price of the outermost tokens in `tokens`
+    function getChainedPrice(address[] memory tokens, int24[] memory ticks)
+        internal
+        pure
+        returns (int256 syntheticTick)
+    {
+        require(tokens.length - 1 == ticks.length, 'DL');
+        for (uint256 i = 1; i <= ticks.length; i++) {
+            // check the tokens for address sort order, then accumulate the
+            // ticks into the running synthetic tick, ensuring that intermediate tokens "cancel out"
+            tokens[i - 1] < tokens[i] ? syntheticTick += ticks[i - 1] : syntheticTick -= ticks[i - 1];
+        }
     }
 }

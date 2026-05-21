@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity =0.7.6;
+pragma solidity =0.8.15;
 pragma abicoder v2;
 
 import '@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol';
-import '@uniswap/lib/contracts/libraries/SafeERC20Namer.sol';
 
+import './libraries/SafeERC20Namer.sol';
 import './libraries/ChainId.sol';
 import './interfaces/INonfungiblePositionManager.sol';
 import './interfaces/INonfungibleTokenPositionDescriptor.sol';
@@ -23,9 +23,25 @@ contract NonfungibleTokenPositionDescriptor is INonfungibleTokenPositionDescript
     address private constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
 
     address public immutable WETH9;
+    /// @dev A null-terminated string
+    bytes32 public immutable nativeCurrencyLabelBytes;
 
-    constructor(address _WETH9) {
+    constructor(address _WETH9, bytes32 _nativeCurrencyLabelBytes) {
         WETH9 = _WETH9;
+        nativeCurrencyLabelBytes = _nativeCurrencyLabelBytes;
+    }
+
+    /// @notice Returns the native currency label as a string
+    function nativeCurrencyLabel() public view returns (string memory) {
+        uint256 len = 0;
+        while (len < 32 && nativeCurrencyLabelBytes[len] != 0) {
+            len++;
+        }
+        bytes memory b = new bytes(len);
+        for (uint256 i = 0; i < len; i++) {
+            b[i] = nativeCurrencyLabelBytes[i];
+        }
+        return string(b);
     }
 
     /// @inheritdoc INonfungibleTokenPositionDescriptor
@@ -35,16 +51,15 @@ contract NonfungibleTokenPositionDescriptor is INonfungibleTokenPositionDescript
         override
         returns (string memory)
     {
-        (, , address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, , , , , ) =
-            positionManager.positions(tokenId);
+        (, , address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, , , , , ) = positionManager
+            .positions(tokenId);
 
-        IUniswapV3Pool pool =
-            IUniswapV3Pool(
-                PoolAddress.computeAddress(
-                    positionManager.factory(),
-                    PoolAddress.PoolKey({token0: token0, token1: token1, fee: fee})
-                )
-            );
+        IUniswapV3Pool pool = IUniswapV3Pool(
+            PoolAddress.computeAddress(
+                positionManager.factory(),
+                PoolAddress.PoolKey({token0: token0, token1: token1, fee: fee})
+            )
+        );
 
         bool _flipRatio = flipRatio(token0, token1, ChainId.get());
         address quoteTokenAddress = !_flipRatio ? token1 : token0;
@@ -58,9 +73,11 @@ contract NonfungibleTokenPositionDescriptor is INonfungibleTokenPositionDescript
                     quoteTokenAddress: quoteTokenAddress,
                     baseTokenAddress: baseTokenAddress,
                     quoteTokenSymbol: quoteTokenAddress == WETH9
-                        ? 'ETH'
+                        ? nativeCurrencyLabel()
                         : SafeERC20Namer.tokenSymbol(quoteTokenAddress),
-                    baseTokenSymbol: baseTokenAddress == WETH9 ? 'ETH' : SafeERC20Namer.tokenSymbol(baseTokenAddress),
+                    baseTokenSymbol: baseTokenAddress == WETH9
+                        ? nativeCurrencyLabel()
+                        : SafeERC20Namer.tokenSymbol(baseTokenAddress),
                     quoteTokenDecimals: IERC20Metadata(quoteTokenAddress).decimals(),
                     baseTokenDecimals: IERC20Metadata(baseTokenAddress).decimals(),
                     flipRatio: _flipRatio,
